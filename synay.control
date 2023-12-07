@@ -1,0 +1,5 @@
+comment = 'synay:  Created by pgrx'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/synay'
+relocatable = false
+superuser = true
