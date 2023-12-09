@@ -6,9 +6,8 @@ pgrx::pg_module_magic!();
 
 #[derive(Deserialize, Serialize, PostgresEnum)]
 enum EventType {
-    Updated,
-    Added,
-    Removed,
+    Save,
+    Drop,
 }
 
 #[derive(Deserialize, Serialize, PostgresType)]
@@ -35,14 +34,30 @@ impl TryFrom<SpiHeapTupleData<'_>> for GameEvent {
     type Error = spi::Error;
 
     fn try_from(value: SpiHeapTupleData) -> Result<Self, Self::Error> {
-        Ok(Self::new(
-            value["id"].value::<Uuid>()?.map(|id| *id.as_bytes()).unwrap(),
-            value["data"]
-                .value::<JsonB>()?
-                .and_then(|data| serde_json::from_value(data.0).ok()),
-            value["event"].value()?.unwrap(),
-            value["added"].value()?.unwrap(),
-        ))
+        if let Some(((id, event), added)) = value["id"]
+            .value::<Uuid>()?
+            .map(|id| *id.as_bytes())
+            .zip(value["event"].value()?)
+            .zip(value["added"].value()?)
+        {
+            Ok(Self::new(
+                id,
+                value["data"]
+                    .value::<JsonB>()?
+                    .and_then(|data| serde_json::from_value(data.0).ok()),
+                event,
+                added,
+            ))
+        } else {
+            Ok(Self::new(
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                value["data"]
+                    .value::<JsonB>()?
+                    .and_then(|data| serde_json::from_value(data.0).ok()),
+                EventType::Save,
+                TimestampWithTimeZone::new_unchecked(0, 0, 0, 0, 0, 0.0),
+            ))
+        }
     }
 }
 
@@ -64,7 +79,7 @@ fn game_agg() -> Result<
         Spi::connect(|client| -> Result<Vec<_>, spi::Error> {
             Ok(client
                 .select(
-                    "SELECT id, data, event, added FROM game_event WHERE event != 'Removed' ORDER BY added;",
+                    "SELECT id, data, event, added FROM game_event WHERE event != 'Drop' ORDER BY added;",
                     None,
                     None,
                 )?
@@ -90,6 +105,32 @@ fn game_agg() -> Result<
 }
 
 extension_sql_file!("../sql/aggs.sql", name = "aggs", requires = ["init", game_agg]);
+
+#[pg_extern]
+fn save_game(id: Option<Uuid>, data: JsonB) -> Result<(), spi::Error> {
+    if let Some(id) = id {
+        Spi::run_with_args(
+            "INSERT INTO game_event (id, data) VALUES ($1, $2);",
+            Some(vec![
+                (PgBuiltInOids::UUIDOID.oid(), id.into_datum()),
+                (PgBuiltInOids::JSONBOID.oid(), data.into_datum()),
+            ]),
+        )
+    } else {
+        Spi::run_with_args(
+            "INSERT INTO game_event (data) VALUES ($1);",
+            Some(vec![(PgBuiltInOids::JSONBOID.oid(), data.into_datum())]),
+        )
+    }
+}
+
+#[pg_extern]
+fn drop_game(id: Uuid) -> Result<(), spi::Error> {
+    Spi::run_with_args(
+        "INSERT INTO game_event (id, event) VALUES ($1, 'Drop');",
+        Some(vec![(PgBuiltInOids::UUIDOID.oid(), id.into_datum())]),
+    )
+}
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
