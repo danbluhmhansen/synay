@@ -1,4 +1,4 @@
-CREATE TABLE e_game (
+CREATE TABLE game_event (
     id uuid NOT NULL,
     data jsonb NULL,
     event EventType NOT NULL DEFAULT 'Updated',

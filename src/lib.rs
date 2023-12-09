@@ -64,7 +64,7 @@ fn game_agg() -> Result<
         Spi::connect(|client| -> Result<Vec<_>, spi::Error> {
             Ok(client
                 .select(
-                    "SELECT id, data, event, added FROM e_game WHERE event != 'Removed' ORDER BY added;",
+                    "SELECT id, data, event, added FROM game_event WHERE event != 'Removed' ORDER BY added;",
                     None,
                     None,
                 )?
@@ -89,20 +89,10 @@ fn game_agg() -> Result<
     ))
 }
 
-#[pg_extern]
-fn hello_synay() -> &'static str {
-    "Hello, synay"
-}
-
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
     use pgrx::{prelude::*, Uuid};
-
-    #[pg_test]
-    fn test_hello_synay() {
-        assert_eq!("Hello, synay", crate::hello_synay());
-    }
 
     #[pg_test]
     fn test_game_agg() {
