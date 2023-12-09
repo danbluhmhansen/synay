@@ -19,3 +19,5 @@ VALUES
         'Updated',
         '2023-01-01T00:00:02Z'
     );
+
+REFRESH MATERIALIZED VIEW game;

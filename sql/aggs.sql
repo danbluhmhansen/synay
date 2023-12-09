@@ -1,0 +1,1 @@
+CREATE MATERIALIZED VIEW game AS SELECT * FROM game_agg();

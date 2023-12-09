@@ -46,7 +46,7 @@ impl TryFrom<SpiHeapTupleData<'_>> for GameEvent {
     }
 }
 
-extension_sql_file!("../sql/init.sql");
+extension_sql_file!("../sql/init.sql", name = "init", requires = [EventType]);
 
 #[pg_extern]
 fn game_agg() -> Result<
@@ -89,6 +89,8 @@ fn game_agg() -> Result<
     ))
 }
 
+extension_sql_file!("../sql/aggs.sql", name = "aggs", requires = ["init", game_agg]);
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
@@ -99,7 +101,7 @@ mod tests {
         Spi::run(include_str!("../sql/tests/game_agg.sql")).unwrap();
         let games = Spi::connect(|client| {
             client
-                .select("SELECT id, name, description FROM game_agg();", None, None)
+                .select("SELECT id, name, description FROM game;", None, None)
                 .unwrap()
                 .map(|row| {
                     (
