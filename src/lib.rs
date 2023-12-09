@@ -1,6 +1,78 @@
+use itertools::Itertools;
 use pgrx::prelude::*;
+use serde::{Deserialize, Serialize};
 
 pgrx::pg_module_magic!();
+
+#[derive(Deserialize, Serialize, PostgresEnum)]
+enum EventType {
+    Updated,
+    Added,
+    Removed,
+}
+
+#[derive(Deserialize, Serialize, PostgresType)]
+struct Game {
+    name: Option<String>,
+    description: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, PostgresType)]
+struct EGame {
+    id: pgrx::UuidBytes,
+    data: Game,
+    event: EventType,
+    added: pgrx::TimestampWithTimeZone,
+}
+
+extension_sql_file!("../sql/init.sql");
+
+#[pg_extern]
+fn game_agg() -> Result<
+    TableIterator<
+        'static,
+        (
+            name!(id, pgrx::Uuid),
+            name!(name, Option<String>),
+            name!(description, Option<String>),
+        ),
+    >,
+    spi::Error,
+> {
+    Ok(TableIterator::new(
+        Spi::connect(|client| -> Result<Vec<_>, spi::Error> {
+            Ok(client
+                .select("SELECT * FROM e_game ORDER BY added;", None, None)?
+                .map(|row| {
+                    (
+                        row["id"].value::<pgrx::Uuid>().unwrap().unwrap(),
+                        row["data"].value::<pgrx::JsonB>(),
+                        row["event"].value::<EventType>(),
+                        row["added"].value::<pgrx::TimestampWithTimeZone>(),
+                    )
+                })
+                .collect())
+        })?
+        .into_iter()
+        .group_by(|(id, _, _, _)| *id)
+        .into_iter()
+        .map(|(id, group)| {
+            let mut name: Option<String> = None;
+            let mut description: Option<String> = None;
+
+            for game in group
+                .filter_map(|(_, data, _, _)| data.ok().flatten())
+                .filter_map(|data| serde_json::from_value::<Game>(data.0).ok())
+            {
+                name = game.name.or(name);
+                description = game.description.or(description);
+            }
+
+            (id, name, description)
+        })
+        .collect::<Vec<_>>(),
+    ))
+}
 
 #[pg_extern]
 fn hello_synay() -> &'static str {
@@ -15,6 +87,34 @@ mod tests {
     #[pg_test]
     fn test_hello_synay() {
         assert_eq!("Hello, synay", crate::hello_synay());
+    }
+
+    #[pg_test]
+    fn test_game_agg() {
+        Spi::run(include_str!("../sql/tests/game_agg.sql")).unwrap();
+        let games = Spi::connect(|client| {
+            client
+                .select("SELECT id, name, description FROM game_agg();", None, None)
+                .unwrap()
+                .map(|row| {
+                    (
+                        row["id"].value::<pgrx::Uuid>(),
+                        row["name"].value::<String>(),
+                        row["description"].value::<String>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(
+            Some(&Some("three".to_string())),
+            games.first().and_then(|game| game.1.as_ref().ok())
+        );
+
+        assert_eq!(
+            Some(&Some("foo".to_string())),
+            games.first().and_then(|game| game.2.as_ref().ok())
+        );
     }
 }
 
