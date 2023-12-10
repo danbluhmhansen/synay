@@ -84,7 +84,7 @@ fn game_agg() -> Result<
         Spi::connect(|client| -> Result<Vec<_>, spi::Error> {
             Ok(client
                 .select(
-                    "SELECT id, data, event, added FROM game_event ORDER BY added;",
+                    "SELECT id, data, event, added FROM game_event ORDER BY id, added;",
                     None,
                     None,
                 )?
@@ -149,8 +149,8 @@ mod tests {
     use pgrx::{prelude::*, Uuid};
 
     #[pg_test]
-    fn test_game_agg() {
-        Spi::run(include_str!("test/game_agg.sql")).unwrap();
+    fn test_save_game() {
+        Spi::run(include_str!("test/save_game.sql")).unwrap();
         let games = Spi::connect(|client| {
             client
                 .select("SELECT id, name, description FROM game;", None, None)
@@ -219,6 +219,26 @@ mod tests {
         );
 
         assert_eq!(Some(&None), games.first().and_then(|game| game.2.as_ref().ok()));
+    }
+
+    #[pg_test]
+    fn test_mult_projections() {
+        Spi::run(include_str!("test/mult_projections.sql")).unwrap();
+        let games = Spi::connect(|client| {
+            client
+                .select("SELECT id, name, description FROM game;", None, None)
+                .unwrap()
+                .map(|row| {
+                    (
+                        row["id"].value::<Uuid>(),
+                        row["name"].value::<String>(),
+                        row["description"].value::<String>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(3, games.len());
     }
 }
 

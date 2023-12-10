@@ -13,7 +13,7 @@ SELECT
 SELECT
     save_game(
         'bd44f000-d7bf-484b-8b31-f71b00104f6d',
-        '{"name":"three","description":null}'
+        '{"name":"three"}'
     );
 
 REFRESH MATERIALIZED VIEW game;
