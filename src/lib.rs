@@ -4,19 +4,24 @@ use serde::{Deserialize, Serialize};
 
 pgrx::pg_module_magic!();
 
-#[derive(Deserialize, Serialize, PostgresEnum)]
+#[derive(Debug, Deserialize, Serialize, PostgresEnum, PartialEq)]
 enum EventType {
     Save,
     Drop,
 }
 
-#[derive(Deserialize, Serialize, PostgresType)]
+#[derive(Debug, Deserialize, Serialize, PostgresType)]
 struct GameData {
     name: Option<String>,
-    description: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "::serde_with::rust::double_option"
+    )]
+    description: Option<Option<String>>,
 }
 
-#[derive(Deserialize, Serialize, PostgresType)]
+#[derive(Debug, Deserialize, Serialize, PostgresType)]
 struct GameEvent {
     id: UuidBytes,
     data: Option<GameData>,
@@ -70,7 +75,7 @@ fn game_agg() -> Result<
         (
             name!(id, Uuid),
             name!(name, Option<String>),
-            name!(description, Option<String>),
+            name!(description, Option<Option<String>>),
         ),
     >,
     spi::Error,
@@ -79,7 +84,7 @@ fn game_agg() -> Result<
         Spi::connect(|client| -> Result<Vec<_>, spi::Error> {
             Ok(client
                 .select(
-                    "SELECT id, data, event, added FROM game_event WHERE event != 'Drop' ORDER BY added;",
+                    "SELECT id, data, event, added FROM game_event ORDER BY added;",
                     None,
                     None,
                 )?
@@ -89,16 +94,22 @@ fn game_agg() -> Result<
         .into_iter()
         .group_by(|game| game.id)
         .into_iter()
+        .filter_map(|(id, games)| {
+            let games = games.collect::<Vec<_>>();
+            games
+                .last()
+                .is_some_and(|game| game.event != EventType::Drop)
+                .then(|| (id, games))
+        })
         .map(|(id, group)| {
-            let mut name: Option<String> = None;
-            let mut description: Option<String> = None;
-
-            for data in group.filter_map(|game| game.data) {
-                name = data.name.or(name);
-                description = data.description.or(description);
-            }
-
-            (Uuid::from_bytes(id), name, description)
+            group.into_iter().filter_map(|game| game.data).fold(
+                (Uuid::from_bytes(id), None::<String>, None::<Option<String>>),
+                |mut acc, GameData { name, description }| {
+                    acc.1 = name.or(acc.1);
+                    acc.2 = description.or(acc.2);
+                    acc
+                },
+            )
         })
         .collect::<Vec<_>>(),
     ))
@@ -139,7 +150,7 @@ mod tests {
 
     #[pg_test]
     fn test_game_agg() {
-        Spi::run(include_str!("../sql/tests/game_agg.sql")).unwrap();
+        Spi::run(include_str!("test/game_agg.sql")).unwrap();
         let games = Spi::connect(|client| {
             client
                 .select("SELECT id, name, description FROM game;", None, None)
@@ -163,6 +174,51 @@ mod tests {
             Some(&Some("foo".to_string())),
             games.first().and_then(|game| game.2.as_ref().ok())
         );
+    }
+
+    #[pg_test]
+    fn test_drop_game() {
+        Spi::run(include_str!("test/drop_game.sql")).unwrap();
+        let games = Spi::connect(|client| {
+            client
+                .select("SELECT id, name, description FROM game;", None, None)
+                .unwrap()
+                .map(|row| {
+                    (
+                        row["id"].value::<Uuid>(),
+                        row["name"].value::<String>(),
+                        row["description"].value::<String>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(0, games.len());
+    }
+
+    #[pg_test]
+    fn test_unset_field() {
+        Spi::run(include_str!("test/unset_field.sql")).unwrap();
+        let games = Spi::connect(|client| {
+            client
+                .select("SELECT id, name, description FROM game;", None, None)
+                .unwrap()
+                .map(|row| {
+                    (
+                        row["id"].value::<Uuid>(),
+                        row["name"].value::<String>(),
+                        row["description"].value::<String>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(
+            Some(&Some("three".to_string())),
+            games.first().and_then(|game| game.1.as_ref().ok())
+        );
+
+        assert_eq!(Some(&None), games.first().and_then(|game| game.2.as_ref().ok()));
     }
 }
 
