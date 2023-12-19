@@ -1,19 +1,11 @@
-use pgrx::{prelude::*, PostgresEnum};
-use serde::{Deserialize, Serialize};
+use pgrx::prelude::*;
 
-mod game;
+mod events;
 
 pgrx::pg_module_magic!();
 
-#[derive(Debug, Deserialize, Serialize, PostgresEnum, PartialEq)]
-enum EventType {
-    Save,
-    Drop,
-}
-
-extension_sql_file!("../sql/init.sql", name = "init", requires = [EventType]);
-
-extension_sql_file!("../sql/aggs.sql", name = "aggs", requires = ["init", game::game_agg]);
+extension_sql_file!("../sql/init.sql", name = "init", requires = [events::EventType]);
+extension_sql_file!("../sql/aggs.sql", name = "aggs", requires = ["init", events::event_agg]);
 
 /// This module is required by `cargo pgrx test` invocations.
 /// It must be visible at the root of your extension crate.

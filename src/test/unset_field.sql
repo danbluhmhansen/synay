@@ -1,17 +1,17 @@
 SELECT
-    save_game(
+    save_event(
         'bd44f000-d7bf-484b-8b31-f71b00104f6d',
         '{"name":"one"}'
     );
 
 SELECT
-    save_game(
+    save_event(
         'bd44f000-d7bf-484b-8b31-f71b00104f6d',
         '{"name":"two","description":"foo"}'
     );
 
 SELECT
-    save_game(
+    save_event(
         'bd44f000-d7bf-484b-8b31-f71b00104f6d',
         '{"name":"three","description":null}'
     );
