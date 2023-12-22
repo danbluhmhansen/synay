@@ -1,12 +1,21 @@
 use itertools::Itertools;
-use pgrx::{prelude::*, spi::SpiHeapTupleData, JsonB, TimestampWithTimeZone, Uuid, UuidBytes};
+use pgrx::{
+    prelude::*,
+    spi::{SpiError, SpiErrorCodes, SpiHeapTupleData},
+    JsonB, TimestampWithTimeZone, Uuid, UuidBytes,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Debug, Deserialize, Serialize, PostgresEnum, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PostgresEnum, PartialEq)]
 enum EventType {
     Save,
     Drop,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PostgresEnum, PartialEq)]
+enum SourceType {
+    Game,
 }
 
 #[derive(Debug, Deserialize, Serialize, PostgresType)]
@@ -14,12 +23,25 @@ struct EventSource {
     id: UuidBytes,
     data: Option<serde_json::Value>,
     event: EventType,
+    source: SourceType,
     added: TimestampWithTimeZone,
 }
 
 impl EventSource {
-    fn new(id: UuidBytes, data: Option<serde_json::Value>, event: EventType, added: TimestampWithTimeZone) -> Self {
-        Self { id, data, event, added }
+    fn new(
+        id: UuidBytes,
+        data: Option<serde_json::Value>,
+        event: EventType,
+        source: SourceType,
+        added: TimestampWithTimeZone,
+    ) -> Self {
+        Self {
+            id,
+            data,
+            event,
+            source,
+            added,
+        }
     }
 }
 
@@ -27,25 +49,21 @@ impl TryFrom<SpiHeapTupleData<'_>> for EventSource {
     type Error = spi::Error;
 
     fn try_from(value: SpiHeapTupleData) -> Result<Self, Self::Error> {
-        if let Some(((id, event), added)) = value["id"]
-            .value::<Uuid>()?
-            .map(|id| *id.as_bytes())
-            .zip(value["event"].value()?)
-            .zip(value["added"].value()?)
-        {
+        if let (Some(id), Some(event), Some(source), Some(added)) = (
+            value["id"].value::<Uuid>()?.map(|id| *id.as_bytes()),
+            value["event"].value()?,
+            value["source"].value()?,
+            value["added"].value()?,
+        ) {
             Ok(Self::new(
                 id,
                 value["data"].value::<JsonB>()?.map(|data| data.0),
                 event,
+                source,
                 added,
             ))
         } else {
-            Ok(Self::new(
-                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                value["data"].value::<JsonB>()?.map(|data| data.0),
-                EventType::Save,
-                TimestampWithTimeZone::new_unchecked(0, 0, 0, 0, 0, 0.0),
-            ))
+            Err(SpiError::SpiError(SpiErrorCodes::TypUnknown))
         }
     }
 }
@@ -57,6 +75,7 @@ fn event_agg() -> Result<
         (
             name!(id, Uuid),
             name!(data, JsonB),
+            name!(source, Option<SourceType>),
             name!(added, Option<TimestampWithTimeZone>),
             name!(updated, Option<TimestampWithTimeZone>),
         ),
@@ -64,15 +83,15 @@ fn event_agg() -> Result<
     spi::Error,
 > {
     Ok(TableIterator::new(
-        Spi::connect(|client| -> Result<Vec<_>, spi::Error> {
+        Spi::connect(|client| -> Result<Vec<EventSource>, spi::Error> {
             Ok(client
                 .select(
-                    "SELECT id, data, event, added FROM event_source ORDER BY id, added;",
+                    "SELECT id, data, event, source, added FROM event_source ORDER BY id, added;",
                     None,
                     None,
                 )?
                 .filter_map(|row| row.try_into().ok())
-                .collect::<Vec<EventSource>>())
+                .collect())
         })?
         .into_iter()
         .group_by(|event| event.id)
@@ -85,11 +104,11 @@ fn event_agg() -> Result<
                 .then(|| (id, events))
         })
         .map(|(id, events)| {
-            let id = Uuid::from_bytes(id);
+            let source = events.first().map(|event| event.source);
             let added = events.first().map(|event| event.added);
             let updated = events.last().map(|event| event.added);
             (
-                id,
+                Uuid::from_bytes(id),
                 JsonB(
                     events
                         .into_iter()
@@ -99,6 +118,7 @@ fn event_agg() -> Result<
                             acc
                         }),
                 ),
+                source,
                 added,
                 updated,
             )
@@ -107,97 +127,64 @@ fn event_agg() -> Result<
     ))
 }
 
-#[pg_extern]
-fn save_event(id: Option<Uuid>, data: JsonB) -> Result<(), spi::Error> {
-    if let Some(id) = id {
-        Spi::run_with_args(
-            "INSERT INTO event_source (id, data) VALUES ($1, $2);",
-            Some(vec![
-                (PgBuiltInOids::UUIDOID.oid(), id.into_datum()),
-                (PgBuiltInOids::JSONBOID.oid(), data.into_datum()),
-            ]),
-        )
-    } else {
-        Spi::run_with_args(
-            "INSERT INTO event_source (data) VALUES ($1);",
-            Some(vec![(PgBuiltInOids::JSONBOID.oid(), data.into_datum())]),
-        )
-    }
-}
-
-#[pg_extern]
-fn drop_event(id: Uuid) -> Result<(), spi::Error> {
-    Spi::run_with_args(
-        "INSERT INTO event_source (id, event) VALUES ($1, 'Drop');",
-        Some(vec![(PgBuiltInOids::UUIDOID.oid(), id.into_datum())]),
-    )
-}
-
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
-    use pgrx::{prelude::*, JsonB, Uuid};
-    use serde_json::json;
+    use pgrx::{prelude::*, Uuid};
 
     #[pg_test]
     fn test_save_event() {
         Spi::run(include_str!("test/save_event.sql")).unwrap();
-        let data = Spi::connect(|client| {
-            client
-                .select("SELECT data FROM game;", None, None)
-                .unwrap()
-                .map(|row| row["data"].value::<JsonB>())
-                .collect::<Vec<_>>()
-        })
-        .into_iter()
-        .map(|data| data.unwrap().unwrap().0)
-        .collect::<Vec<_>>();
 
-        assert_eq!(Some(&json!({"name": "three", "description": "foo"})), data.first());
+        assert_eq!(
+            Ok(Some("three".to_string())),
+            Spi::get_one::<String>("SELECT name FROM game LIMIT 1;")
+        );
+        assert_eq!(
+            Ok(Some("foo".to_string())),
+            Spi::get_one::<String>("SELECT description FROM game LIMIT 1;")
+        );
     }
 
     #[pg_test]
     fn test_drop_event() {
         Spi::run(include_str!("test/drop_event.sql")).unwrap();
-        let events = Spi::connect(|client| {
+        let games = Spi::connect(|client| {
             client
-                .select("SELECT id, data FROM game;", None, None)
+                .select("SELECT id FROM game;", None, None)
                 .unwrap()
-                .map(|row| (row["id"].value::<Uuid>(), row["data"].value::<JsonB>()))
+                .map(|row| row["id"].value::<Uuid>())
                 .collect::<Vec<_>>()
         });
 
-        assert_eq!(0, events.len());
+        assert_eq!(0, games.len());
     }
 
     #[pg_test]
     fn test_unset_field() {
         Spi::run(include_str!("test/unset_field.sql")).unwrap();
-        let data = Spi::connect(|client| {
-            client
-                .select("SELECT data FROM game;", None, None)
-                .unwrap()
-                .map(|row| row["data"].value::<JsonB>())
-                .collect::<Vec<_>>()
-        })
-        .into_iter()
-        .map(|data| data.unwrap().unwrap().0)
-        .collect::<Vec<_>>();
 
-        assert_eq!(Some(&json!({"name": "three"})), data.first());
+        assert_eq!(
+            Ok(Some("three".to_string())),
+            Spi::get_one::<String>("SELECT name FROM game LIMIT 1;")
+        );
+        assert_eq!(
+            Ok(None),
+            Spi::get_one::<String>("SELECT description FROM game LIMIT 1;")
+        );
     }
 
     #[pg_test]
     fn test_mult_projections() {
         Spi::run(include_str!("test/mult_projections.sql")).unwrap();
-        let events = Spi::connect(|client| {
+        let games = Spi::connect(|client| {
             client
-                .select("SELECT id, data FROM game;", None, None)
+                .select("SELECT id FROM game;", None, None)
                 .unwrap()
-                .map(|row| (row["id"].value::<Uuid>(), row["data"].value::<JsonB>()))
+                .map(|row| row["id"].value::<Uuid>())
                 .collect::<Vec<_>>()
         });
 
-        assert_eq!(3, events.len());
+        assert_eq!(3, games.len());
     }
 }
